@@ -45,5 +45,5 @@ Average: average of 10 timers
 |  | CPU | GPU |
 | ------ | ------ | ------ |
 | c++ | 842.667 msec | -- |
-| dpc++ | 0.24894 msec | 0.1015 msec |
+| dpc++ | 4.4894 msec | 0.1015 msec |
 
