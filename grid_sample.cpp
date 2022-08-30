@@ -1,42 +1,22 @@
+
+
+//#include <grid_sample.h>
 #include <iostream>
 #include <vector>
-#include <CL/sycl.hpp>
 #include <math.h>
 #include <chrono>
-
 using namespace std;
-using namespace cl::sycl;
-constexpr int IH = 512;
-constexpr int IW = 960;
-constexpr int OH = 2048;
-constexpr int OW = 3840;
 
-static inline bool within_bounds_2d(int h, int w, int H, int W)
-{
+static inline bool within_bounds_2d(int h, int w, int H, int W) {
   return h >= 0 && h < H && w >= 0 && w < W;
 }
 
-// e0 is the first event, en is the last event
-// find the time difference between the starting time of the e0 and
-// the ending time of en, return micro-second
-inline double report_time(const std::string &msg, event e0, event en)
-{
-  cl_ulong time_start =
-      e0.get_profiling_info<info::event_profiling::command_start>();
-  cl_ulong time_end =
-      en.get_profiling_info<info::event_profiling::command_end>();
-  double elapsed = (time_end - time_start) / 1e6;
-  // cerr << msg << elapsed << " msecs" << std::endl;
-  return elapsed;
-}
 
-class Timer
-{
+class Timer {
 public:
   Timer() : start_(std::chrono::steady_clock::now()) {}
 
-  double Elapsed()
-  {
+  double Elapsed() {
     auto now = std::chrono::steady_clock::now();
     return std::chrono::duration_cast<Duration>(now - start_).count();
   }
@@ -46,138 +26,151 @@ private:
   std::chrono::steady_clock::time_point start_;
 };
 
-auto grid_sample(float (*input)[IW], float (*grid)[OW][2], sycl::queue q)
-{
-  Timer timer;
+//using namespace cl::sycl;
+
+vector<vector<vector<vector<float> > > > grid_simple(vector<vector<vector<vector<float> > > > input,
+    vector<vector<vector<vector<float> > > > grid,
+    vector<vector<vector<vector<float> > > > output) {
+
+  int N = input.size();
+  int C = input[0].size();
+  int IH = input[0][0].size();
+  int IW = input[0][0][0].size();
+  int H = grid[0].size();
+  int W = grid[0][0].size();
   float zero_point = 0.;
-  float(*output)[OW] = new float[OH][OW];
-  try
-  {
-
-    buffer input_buf(reinterpret_cast<float *>(input), range(IH, IW));
-    buffer grid_buf(reinterpret_cast<float *>(grid), range(OH, OW, 2));
-    buffer output_buf(reinterpret_cast<float *>(output), range(OH, OW));
-
-    double etime = 0;
-    double start;
-    double kernel_times = 0;
-    float iters = 5;
-    // loop over each output pixel
-    for (int i = 0; i < iters; i++)
-    {
-      auto e = q.submit([&](auto &h)
-                        {
-                          // Read from input and grid, write to output
-                          auto start1 = timer.Elapsed();
-                          accessor inp(input_buf, h, read_only);
-                          accessor gri(grid_buf, h, read_only);
-                          accessor out(output_buf, h, write_only);
-                          // Execute kernel.
-                          h.parallel_for(range(OH, OW), [=](auto index)
-                                         { 
-                                           // Get global position in Y direction.
-                                           int h = index[0];
-                                           // Get global position in X direction.
-                                           int w = index[1];
-                                           // get the corresponding input x, y co-ordinates from grid
-                                           float rx = gri[h][w][0];
-                                           float ry = gri[h][w][1];
-                                           // normalize ix, iy from [-1, 1] to [0, IH-1] & [0, IW-1]
-                                           float ix = ((rx + 1) / 2) * (IW - 1);
-                                           float iy = ((ry + 1) / 2) * (IH - 1);
-                                           // get NE, NW, SE, SW pixel values from (x, y)
-                                           int ix_nw = std::floor(ix);
-                                           int iy_nw = std::floor(iy);
-                                           int ix_ne = ix_nw + 1;
-                                           int iy_ne = iy_nw;
-                                           int ix_sw = ix_nw;
-                                           int iy_sw = iy_nw + 1;
-                                           int ix_se = ix_nw + 1;
-                                           int iy_se = iy_nw + 1;
-                                           // get surfaces to each neighbor:
-                                           float nw = (ix_se - ix) * (iy_se - iy);
-                                           float ne = (ix - ix_sw) * (iy_sw - iy);
-                                           float sw = (ix_ne - ix) * (iy - iy_ne);
-                                           float se = (ix - ix_nw) * (iy - iy_nw);
-                                           // calculate bilinear weighted pixel value and set output pixel
-
-                                           //   (c, iy_nw, ix_nw) * nw + (c, iy_ne, ix_ne) * ne
-                                           // + (c, iy_sw, ix_sw) * sw + (c, iy_se, ix_se) * se
-                                           float res = 0;
-                                           res += within_bounds_2d(iy_nw, ix_nw, IH, IW)
-                                                      ? inp[iy_nw][ix_nw] * nw
-                                                      : zero_point * nw;
-                                           res += within_bounds_2d(iy_ne, ix_ne, IH, IW)
-                                                      ? inp[iy_ne][ix_ne] * ne
-                                                      : zero_point * ne;
-                                           res += within_bounds_2d(iy_sw, ix_sw, IH, IW)
-                                                      ? inp[iy_sw][ix_sw] * sw
-                                                      : zero_point * sw;
-                                           res += within_bounds_2d(iy_se, ix_se, IH, IW)
-                                                      ? inp[iy_se][ix_se] * se
-                                                      : zero_point * se;
-                                           out[h][w] = res; // std::round(res);
-                                           
-                                         });
-                          auto end1 = timer.Elapsed();
-                          float total_time1 = (end1 - start1) * 1000.f;
-                          std::cerr << "parallel_for time=" << total_time1 << " msec\n";
-                        });
-      e.wait();
-      etime = report_time("kernel time", e, e);
-      if (i > 0)
-        kernel_times += etime;
-      else
-        start = timer.Elapsed();
-    }
-    double end = timer.Elapsed();
-    float total_time = (end - start) * 1000.f / iters;
-    float kernel_time = kernel_times / iters;
-    std::cerr << "GPU kernel time=" << kernel_time << " msec\n";
-    std::cerr << "GPU total time=" << total_time << " msec\n";
-  }
-  catch (sycl::exception const &e)
-  {
-    cout << "An exception is caught while sampling.\n";
-    terminate();
-  }
   
+
+  // loop over each output pixel
+  int n, h, w, c;
+//#pragma omp parallel for private(n, h, w, c)
+  for (n = 0; n < N; ++n) {
+    for (h = 0; h < H; ++h) {
+      for (w = 0; w < W; ++w) {
+        // get the corresponding input x, y co-ordinates from grid
+        
+        float rx = grid[n][h][w][0];
+        float ry = grid[n][h][w][1];
+        //cout << "real x:" << rx << ", real y: "<< ry <<endl;
+
+        // normalize ix, iy from [-1, 1] to [0, IH-1] & [0, IW-1]
+        float ix = ((rx + 1) / 2) * (IW-1);
+        float iy = ((ry + 1) / 2) * (IH-1);
+
+        // get NE, NW, SE, SW pixel values from (x, y)
+        int ix_nw = std::floor(ix);
+        int iy_nw = std::floor(iy);
+        int ix_ne = ix_nw + 1;
+        int iy_ne = iy_nw;
+        int ix_sw = ix_nw;
+        int iy_sw = iy_nw + 1;
+        int ix_se = ix_nw + 1;
+        int iy_se = iy_nw + 1;
+        //cout << "ix_nw: " << ix_nw << ", iy_nw: " << iy_nw << ", ix: " << ix << ", iy: "<< iy <<endl;
+        // get surfaces to each neighbor:
+        float nw = (ix_se - ix)    * (iy_se - iy);
+        float ne = (ix    - ix_sw) * (iy_sw - iy);
+        float sw = (ix_ne - ix)    * (iy    - iy_ne);
+        float se = (ix    - ix_nw) * (iy    - iy_nw);
+        //cout << "nw: " << nw << ", ne: " << ne << ", sw: " << sw << ", se: "<< se <<endl;
+
+        // calculate bilinear weighted pixel value and set output pixel
+        for (c = 0; c < C; ++c) {
+          //   (c, iy_nw, ix_nw) * nw + (c, iy_ne, ix_ne) * ne
+          // + (c, iy_sw, ix_sw) * sw + (c, iy_se, ix_se) * se
+          float res = 0;
+            res += within_bounds_2d(iy_nw, ix_nw, IH, IW)
+                ? input[n][c][iy_nw][ix_nw] * nw
+                : zero_point * nw;
+            //cout <<"input data: "<< zero_point * nw<< ", res1:" << res << endl;
+            res += within_bounds_2d(iy_ne, ix_ne, IH, IW)
+                ? input[n][c][iy_ne][ix_ne] * ne
+                : zero_point * ne;
+            //cout <<"input data: "<<zero_point * ne<< ", res2:" << res << endl;
+            res += within_bounds_2d(iy_sw, ix_sw, IH, IW)
+                ? input[n][c][iy_sw][ix_sw] * sw
+                : zero_point * sw;
+            //cout <<"input data: "<<zero_point * sw<< ", res3:" << res << endl;
+            res += within_bounds_2d(iy_se, ix_se, IH, IW)
+                ? input[n][c][iy_se][ix_se] * se
+                : zero_point * se;
+            //cout <<"input data: "<<zero_point * se << ", res4:" << res << endl;
+            output[n][c][h][w] = res; // std::round(res);
+            //cout << "output: "<< output[n][c][h][w] <<endl;
+        }
+      }
+    }
+  }
   return output;
 }
 
-int main()
-{
-  //vector<vector<vector<vector<float> > > > input(N,vector<vector<vector<float> > >(C, vector<vector<float> >(IH, vector<float>(IW,1.0))));
-  //vector<vector<vector<vector<float> > > > grid(N,vector<vector<vector<float> > >(OH, vector<vector<float> >(OW, vector<float>(2,0.0000))));
-  float(*input)[IW] = new float[IH][IW];
-  float(*grid)[OW][2] = new float[OH][OW][2];
-  int i = 0;
-  for (int j = 0; j < OH; ++j)
-  {
-    for (int k = 0; k < OW; ++k)
-    {
-      grid[j][k][0] = 1.0f;
-      grid[j][k][1] = 2.0f;
-    }
-  }
+int main(){
+    cout<<"begin"<<endl;
+    int in_N = 1;
+    int in_C = 1;
+    int in_H = 512;
+    int in_W = 960;
+    int out_H = 1024;
+    int out_W = 960;
+    vector<vector<vector<vector<float> > > > input(in_N,vector<vector<vector<float> > >(in_C, vector<vector<float> >(in_H, vector<float>(in_W,1.0)))); 
+    vector<vector<vector<vector<float> > > > grid(in_N,vector<vector<vector<float> > >(out_H, vector<vector<float> >(out_W, vector<float>(2,0.0000))));
+    vector<vector<vector<vector<float> > > > output(in_N,vector<vector<vector<float> > >(in_C, vector<vector<float> >(out_H, vector<float>(out_W,0.0))));
+    /*
+    vector<float> list_grid = {-1.0000, -1.0000,
+          -1.0000, -0.5000,
+          -1.0000,  0.0000,
+          -1.0000,  0.5000,
+          -1.0000,  1.0000,
 
-  float pixel = 1.0;
-  for (int k = 0; k < IH; ++k)
-  {
-    for (int l = 0; l < IW; ++l)
-    {
-      input[k][l] = pixel;
-      pixel = 1.0;
-    }
-  }
+         -0.5000, -1.0000,
+          -0.5000, -0.5000,
+          -0.5000,  0.0000,
+          -0.5000,  0.5000,
+          -0.5000,  1.0000,
 
-  Timer timer;
-  sycl::queue q(default_selector{});
-  cout << "Device: " << q.get_device().get_info<info::device::name>() << "\n";
-  auto start = timer.Elapsed();
-  float(*output)[OW] = grid_sample(input, grid, q);
-  auto end = timer.Elapsed();
-  float total_time = (end - start) * 1000.f;
-  std::cerr << "sample time=" << total_time << " msec\n";
-  delete[] output;
+           0.0000, -1.0000,
+           0.0000, -0.5000,
+           0.0000,  0.0000,
+           0.0000,  0.5000,
+           0.0000,  1.0000,
+
+          0.5000, -1.0000,
+           0.5000, -0.5000,
+           0.5000,  0.0000,
+           0.5000,  0.5000,
+           0.5000,  1.0000,
+
+          1.0000, -1.0000,
+           1.0000, -0.5000,
+           1.0000,  0.0000,
+           1.0000,  0.5000,
+           1.0000,  1.0000};
+    int idx = 0;
+    for (int i= 0; i < in_N; ++i){
+        for(int j = 0; j < out_H; ++j){
+            for(int k = 0; k < out_W; ++k){
+                    grid[i][j][k][0] = list_grid[idx++];
+                    grid[i][j][k][1] = list_grid[idx++];
+                    //cout<<"grid x： "<< grid[i][j][k][0] << " , grid y: "<< grid[i][j][k][1]<<endl;
+            }
+        }
+    }
+    float pixel = 1.0;
+    for (int i= 0; i < in_N; ++i){
+        for(int j = 0; j < in_C; ++j){
+            for(int k = 0; k < in_H; ++k){
+                for (int l = 0; l < in_W; ++l){
+                    input[i][j][k][l] = pixel++ ;
+                    //cout << "input : " << input[i][j][k][l] <<endl;
+                }    
+            }
+        }
+    }
+    */
+    Timer timer;
+    auto start = timer.Elapsed(); 
+    output = grid_simple(input,grid,output);
+    auto end = timer.Elapsed();
+    float total_time = (end - start) * 1000.f;    
+    std::cerr << "sample time=" << total_time << " msec\n";
 }
