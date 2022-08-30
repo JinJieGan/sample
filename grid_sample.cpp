@@ -43,7 +43,7 @@ vector<vector<vector<vector<float> > > > grid_simple(vector<vector<vector<vector
 
   // loop over each output pixel
   int n, h, w, c;
-//#pragma omp parallel for private(n, h, w, c)
+
   for (n = 0; n < N; ++n) {
     for (h = 0; h < H; ++h) {
       for (w = 0; w < W; ++w) {
